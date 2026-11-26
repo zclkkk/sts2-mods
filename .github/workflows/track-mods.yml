@@ -9,7 +9,7 @@ on:
     paths:
       - '.github/workflows/track-mods.yml'
       - 'mods.py'
-      - 'mods.lock.json'
+      - 'mods.json'
 
 permissions:
   contents: write
@@ -41,8 +41,7 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/sts2-release"
           tag=$(cat release-tag.txt)
-          game_version=$(jq -r .game_version mods.bundle.json)
-          bundle="sts2-mods-$game_version.zip"
+          bundle="sts2-mods.zip"
           assets=("$bundle" "$bundle.sha256" mods.bundle.json)
 
           if release=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft,url 2>/dev/null); then
@@ -54,7 +53,7 @@ jobs:
             url=$(jq -r .url <<< "$release")
           else
             url=$(gh release create "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" --latest --title "STS2 $game_version Mods · ${tag##*-}" \
+              --target "$GITHUB_SHA" --latest --title "STS2 Public Beta Mods · ${tag##*-}" \
               --notes-file release-notes.md)
           fi
           printf '[下载打包后的 Mods](%s)\n' "$url" >> "$GITHUB_STEP_SUMMARY"

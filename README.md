@@ -1,6 +1,6 @@
 # 杀戮尖塔 2 Mod 打包
 
-从 [GitHub Releases](https://github.com/zclkkk/sts2-mods/releases/latest) 下载与游戏版本匹配的 `sts2-mods-<游戏版本>.zip`。当前打包目标是 Steam `public-beta` 的 **0.114.0**，包含 RitsuLib、BaseLib（含 Compatibility Helper）、随机数预测和 Undo And Restart。
+从 [GitHub Releases](https://github.com/zclkkk/sts2-mods/releases/latest) 下载 `sts2-mods.zip`。这套包用于 Steam Public Beta，包含 RitsuLib、BaseLib（含 Compatibility Helper）、随机数预测和 Undo And Restart。
 
 ## 安装
 
@@ -10,15 +10,14 @@ Release 同时提供 ZIP 的 SHA-256 和 `mods.bundle.json`，后者记录各上
 
 ## 自动发布
 
-GitHub Actions 每天新加坡时间 10:23 计划运行。也可在 Actions 页面手动运行 **Build and release mods**。每次运行会下载作者的正式 Release 安装包、检查包里的 Mod ID、版本、游戏版本下限及依赖，然后把完整的 `mods/` 打成 ZIP。上游包组合相同就沿用现有 Release。
+GitHub Actions 每天新加坡时间 10:23 计划运行。也可在 Actions 页面手动运行 **Build and release mods**。每次运行直接查询各作者的最新正式 Release，下载 `mods.json` 指定的 ZIP，核对下载和解压是否成功，再把完整的 `mods/` 打成 ZIP。上游包组合相同就沿用现有 Release。
 
-Undo And Restart 按游戏版本选择对应正式包。RitsuLib 使用多版本变体包，并检查包中有对应的游戏版本组件。如果上游包无法匹配或依赖检查失败，工作流会报错。
+游戏升级后，CI 继续追踪各作者的发布。游戏补丁和 Mod 发布时间可能有差异，实际兼容性以作者说明和游戏内表现为准。
 
-`mods.lock.json` 记录目标游戏版本、Mod 来源和文件命名规则。里面的 `tag` 和 `sha256` 是一组已知版本，供 `python3 mods.py install` 回退安装。自动打包直接查询上游，游戏升级时先更新目标版本。
-
-用 Python 3.11 或以上版本可以在本机查看打包会选用的版本，或者生成一份同结构的 ZIP。
+用 Python 3.11 或以上版本可以查看上游版本、在本机生成同结构的 ZIP，或在退出游戏后安装上游最新包。
 
 ```bash
 python3 mods.py check
 python3 mods.py bundle --output /tmp/sts2-mod-bundle
+python3 mods.py install
 ```

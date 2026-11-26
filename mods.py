@@ -26,17 +26,6 @@ def read_json(path):
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
-def version(tag):
-    if not re.fullmatch(r"v?\d+(\.\d+){1,4}", tag):
-        raise ValueError(f"不支持的版本标签 {tag!r}")
-    return tuple(int(part) for part in tag.removeprefix("v").split("."))
-
-
-def asset_name(mod, tag):
-    version(tag)
-    return mod["asset"].format(version=tag.removeprefix("v"))
-
-
 def github_open(url, *, api=False):
     headers = {"User-Agent": "sts2-mods"}
     if api:
@@ -47,65 +36,36 @@ def github_open(url, *, api=False):
     return urlopen(Request(url, headers=headers), timeout=30)
 
 
-def github_json(url):
-    with github_open(url, api=True) as response:
-        return json.load(response)
-
-
-def latest_release(mod, game_version):
-    api = f'https://api.github.com/repos/{mod["repo"]}/releases'
-    if not mod.get("game_versioned_tags"):
-        return github_json(f"{api}/latest")
-
-    # Undo And Restart publishes separate releases for each exact game version.
-    pattern = rf"v?{re.escape(game_version)}\.\d+"
-    page = 1
-    while releases := github_json(f"{api}?per_page=100&page={page}"):
-        matches = [
-            release for release in releases
-            if not release["draft"] and not release["prerelease"]
-            and re.fullmatch(pattern, release["tag_name"])
-        ]
-        if matches:
-            return max(matches, key=lambda release: version(release["tag_name"]))
-        page += 1
-    raise ValueError(f'未找到 {mod["name"]} 对应游戏 {game_version} 的正式版')
-
-
-def latest_mods(lock):
+def latest_mods(config):
     choices = []
-    for mod in lock["mods"]:
+    for mod in config["mods"]:
         try:
-            release = latest_release(mod, lock["game_version"])
+            with github_open(f'https://api.github.com/repos/{mod["repo"]}/releases/latest', api=True) as response:
+                release = json.load(response)
             tag = release["tag_name"]
-            name = asset_name(mod, tag)
+            name = mod["asset"].format(version=tag.removeprefix("v"))
             asset = next((item for item in release["assets"] if item["name"] == name), None)
             if asset is None:
                 raise ValueError(f"{tag} 缺少预期的安装包 {name}")
             digest = asset.get("digest")
             if digest and not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
                 raise ValueError(f"{name} 的 GitHub 校验值无效")
-            choices.append({**mod, "tag": tag, "sha256": digest[7:] if digest else None})
+            choices.append({**mod, "tag": tag, "asset": name, "sha256": digest[7:] if digest else None})
             print(f'{mod["name"]}: {tag} ({name})')
         except (URLError, ValueError, KeyError) as error:
             raise ValueError(f'{mod["name"]} 查询失败：{error}') from error
     return choices
 
 
-def manifests(folder, *, strict=True):
-    result = {}
+def installed_ids(folder):
+    result = set()
     for path in folder.glob("*.json"):
         try:
             data = read_json(path)
-        except (ValueError, UnicodeError):
-            if strict:
-                raise
+        except ValueError:
             continue
-        if isinstance(data, dict) and "id" in data and "version" in data:
-            mod_id = data["id"]
-            if mod_id in result:
-                raise ValueError(f"{folder} 中有重复的 Mod ID {mod_id}")
-            result[mod_id] = data
+        if isinstance(data, dict) and isinstance(data.get("id"), str) and "version" in data:
+            result.add(data["id"])
     return result
 
 
@@ -126,31 +86,23 @@ def unpack(mod, package, destination):
                 raise ValueError(f"{package.name} 的归档条目无效：{entry.filename!r}")
             seen.add(path)
         archive.extractall(destination)
-    found = manifests(destination)
-    if set(found) != set(mod["ids"]) or version(found[mod["ids"][0]]["version"]) != version(mod["tag"]):
-        raise ValueError(f"{package.name} 的 Mod 清单与预期不同")
-    return digest, found
+    return digest
 
 
 def pack_files(mods, source, destination):
-    details = {}
     for mod in mods:
-        name = asset_name(mod, mod["tag"])
-        file = source / name
+        file = source / mod["asset"]
         if not file.is_file():
             raise ValueError(f"找不到 {file}")
         folder = destination / mod["ids"][0]
         folder.mkdir()
-        digest, found = unpack(mod, file, folder)
-        details.update(found)
-        mod["sha256"] = digest
+        mod["sha256"] = unpack(mod, file, folder)
         print(f'已核对 {mod["name"]} {mod["tag"]}')
-    return details
 
 
 def fetch_packs(mods, destination):
     for mod in mods:
-        name = asset_name(mod, mod["tag"])
+        name = mod["asset"]
         repo = mod["repo"]
         tag = quote(mod["tag"], safe="")
         url = f"https://github.com/{repo}/releases/download/{tag}/{quote(name, safe='')}"
@@ -158,30 +110,9 @@ def fetch_packs(mods, destination):
             shutil.copyfileobj(response, file)
 
 
-def validate_bundle(game_version, found, mods):
-    target = version(game_version)
-    for mod_id, manifest in found.items():
-        minimum = manifest.get("min_game_version")
-        if minimum and version(minimum) > target:
-            raise ValueError(f"{mod_id} 需要游戏 {minimum} 或更新版本")
-        for dependency in manifest.get("dependencies") or []:
-            dep_id = dependency if isinstance(dependency, str) else dependency["id"]
-            if dep_id not in found:
-                raise ValueError(f"{mod_id} 缺少依赖 {dep_id}")
-            minimum = dependency.get("min_version") if isinstance(dependency, dict) else None
-            if minimum and version(found[dep_id]["version"]) < version(minimum):
-                raise ValueError(f"{mod_id} 需要 {dep_id} {minimum} 或更新版本")
-    variants = mods / "STS2-RitsuLib" / "compat"
-    if variants.is_dir():
-        versions = [version(path.name) for path in variants.iterdir() if path.is_dir()]
-        if not any(candidate[:2] == target[:2] and candidate <= target for candidate in versions):
-            raise ValueError(f"RitsuLib 变体包缺少与游戏 {game_version} 匹配的组件")
-
-
-def build_bundle(lock, output):
+def build_bundle(config, output):
     output.mkdir(parents=True, exist_ok=True)
-    game_version = lock["game_version"]
-    selected = latest_mods(lock)
+    selected = latest_mods(config)
     with tempfile.TemporaryDirectory(prefix="sts2-bundle-") as temp:
         work = Path(temp)
         packages = work / "packages"
@@ -189,28 +120,20 @@ def build_bundle(lock, output):
         packages.mkdir()
         mods.mkdir()
         fetch_packs(selected, packages)
-        found = pack_files(selected, packages, mods)
-        validate_bundle(game_version, found, mods)
+        pack_files(selected, packages, mods)
 
         sources = [
-            {
-                "name": mod["name"],
-                "repo": mod["repo"],
-                "tag": mod["tag"],
-                "asset": asset_name(mod, mod["tag"]),
-                "sha256": mod["sha256"],
-            }
+            {key: mod[key] for key in ("name", "repo", "tag", "asset", "sha256")}
             for mod in selected
         ]
         manifest = {
-            "format": 1,
-            "game_version": game_version,
-            "steam_branch": lock["steam_branch"],
+            "format": 2,
+            "steam_branch": config["steam_branch"],
             "mods": sources,
         }
         metadata = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode()
-        tag = f'mods-{game_version}-{hashlib.sha256(metadata).hexdigest()[:16]}'
-        bundle_name = f"sts2-mods-{game_version}.zip"
+        tag = f'mods-{hashlib.sha256(metadata).hexdigest()[:16]}'
+        bundle_name = "sts2-mods.zip"
         (work / "mods.bundle.json").write_bytes(metadata)
         with ZipFile(work / bundle_name, "w") as archive:
             files = sorted(path for path in mods.rglob("*") if path.is_file())
@@ -226,7 +149,7 @@ def build_bundle(lock, output):
             shutil.move(work / name, output / name)
 
     notes = [
-        f'游戏版本 **{game_version}**（`{lock["steam_branch"]}`）。',
+        f'Steam `{config["steam_branch"]}` 使用的 Mod 合集，收录各作者的最新正式 Release。',
         "",
         f"解压 `{bundle_name}`，把其中的 `mods/` 放进游戏安装目录。",
         "",
@@ -241,12 +164,12 @@ def build_bundle(lock, output):
     print(f"已生成 {bundle_name}（{tag}）")
 
 
-def preserve_unmanaged(lock, mods, destination):
+def preserve_unmanaged(config, mods, destination):
     if not mods.exists():
         return
-    managed = {mod_id for mod in lock["mods"] for mod_id in mod["ids"]}
+    managed = {mod_id for mod in config["mods"] for mod_id in mod["ids"]}
     for path in mods.iterdir():
-        found = set(manifests(path, strict=False)) if path.is_dir() and not path.is_symlink() else set()
+        found = installed_ids(path) if path.is_dir() and not path.is_symlink() else set()
         if found & managed:
             if found - managed:
                 raise ValueError(f"{path} 同时包含其他 Mod，请先拆分目录")
@@ -260,15 +183,15 @@ def preserve_unmanaged(lock, mods, destination):
             shutil.copy2(path, target, follow_symlinks=False)
 
 
-def install(lock, game, packages, *, dry_run=False):
-    installed_version = read_json(game / "release_info.json")["version"]
-    if version(installed_version) != version(lock["game_version"]):
-        raise ValueError(f'本机游戏版本 {installed_version} 与锁定版本 {lock["game_version"]} 不同')
+def install(config, game, packages, *, dry_run=False):
+    if not (game / "release_info.json").is_file():
+        raise ValueError(f"找不到游戏安装目录：{game}")
     mods = game / "mods"
     backup = game / ".sts2-mods-previous"
     if mods.is_symlink() or (mods.exists() and not mods.is_dir()) or os.path.lexists(backup):
         raise ValueError(f"请检查安装目录 {mods} 和可能的备份 {backup}")
 
+    selected = latest_mods(config)
     # The staged tree and game directory must be on the same filesystem for rename.
     with tempfile.TemporaryDirectory(prefix=".sts2-mods-", dir=None if dry_run else game) as temp:
         staging = Path(temp)
@@ -277,15 +200,13 @@ def install(lock, game, packages, *, dry_run=False):
         if packages is None:
             packages = staging / "packages"
             packages.mkdir()
-            fetch_packs(lock["mods"], packages)
-        pack_files(lock["mods"], packages, next_mods)
-        preserve_unmanaged(lock, mods, next_mods)
+            fetch_packs(selected, packages)
+        pack_files(selected, packages, next_mods)
+        preserve_unmanaged(config, mods, next_mods)
         if dry_run:
             print(f"预检查通过：{mods}")
             return
 
-        if read_json(game / "release_info.json")["version"] != installed_version:
-            raise ValueError("准备安装时游戏版本发生了变化")
         if mods.exists():
             mods.rename(backup)
         try:
@@ -305,24 +226,24 @@ def main():
     commands.add_parser("check", help="显示将打包的作者正式 Release")
     bundle = commands.add_parser("bundle", help="打包作者最新的正式 Release")
     bundle.add_argument("--output", type=Path, required=True)
-    deploy = commands.add_parser("install", help="安装锁定版本，请先退出游戏")
+    deploy = commands.add_parser("install", help="安装作者最新的正式 Release，请先退出游戏")
     deploy.add_argument("--game-dir", type=Path, default=DEFAULT_GAME)
     deploy.add_argument("--packages", type=Path, help="使用已下载的 ZIP")
     deploy.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-    lock = read_json(ROOT / "mods.lock.json")
     try:
+        config = read_json(ROOT / "mods.json")
         if args.command == "check":
-            latest_mods(lock)
+            latest_mods(config)
         elif args.command == "bundle":
-            build_bundle(lock, args.output)
+            build_bundle(config, args.output)
         elif args.dry_run:
-            install(lock, args.game_dir, args.packages, dry_run=True)
+            install(config, args.game_dir, args.packages, dry_run=True)
         else:
             directory = os.open(args.game_dir, os.O_DIRECTORY)
             try:
                 fcntl.flock(directory, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                install(lock, args.game_dir, args.packages)
+                install(config, args.game_dir, args.packages)
             finally:
                 os.close(directory)
     except (OSError, ValueError, KeyError, BadZipFile) as error:
