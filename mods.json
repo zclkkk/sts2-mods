@@ -24,6 +24,12 @@
       "repo": "yuudong123/Sts2UndoAndRestart",
       "asset": "UndoAndRestart-{version}.zip",
       "folder": "UndoAndRestart"
+    },
+    {
+      "name": "Combat Solver",
+      "repo": "Torch1230/CombatSolver",
+      "asset": "CombatSolver-{version}.zip",
+      "folder": "CombatSolver"
     }
   ]
 }

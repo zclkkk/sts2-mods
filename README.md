@@ -1,6 +1,6 @@
 # 杀戮尖塔 2 Mod 打包
 
-从 [GitHub Releases](https://github.com/zclkkk/sts2-mods/releases/latest) 下载 `sts2-mods.zip`。这套包用于 Steam Public Beta，包含 RitsuLib、BaseLib（含 Compatibility Helper）、随机数预测和 Undo And Restart。
+从 [GitHub Releases](https://github.com/zclkkk/sts2-mods/releases/latest) 下载 `sts2-mods.zip`。这套包用于 Steam Public Beta，包含 RitsuLib、BaseLib（含 Compatibility Helper）、随机数预测、Undo And Restart 和 Combat Solver。Combat Solver 仅在单人战斗中启用。
 
 ## 安装
 
