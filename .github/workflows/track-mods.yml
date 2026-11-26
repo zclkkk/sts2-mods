@@ -1,0 +1,60 @@
+name: Track mod releases
+
+on:
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: track-mod-releases
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check upstream releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 mods.py check --report "$RUNNER_TEMP/mod-updates.md" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish or refresh the update issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title='Mod 更新候选'
+          marker='<!-- sts2-mods:release-tracker -->'
+          report="$RUNNER_TEMP/mod-updates.md"
+          existing=$(gh issue list --state open --limit 100 --json number,title,body \
+            --jq 'map(select(.title == "Mod 更新候选" and (.body | startswith("<!-- sts2-mods:release-tracker -->")))) | .[0].number // empty')
+          if [[ ! -s "$report" ]]; then
+            if [[ -n "$existing" ]]; then
+              gh issue close "$existing" --comment '锁定清单已跟上当前的上游正式版本。'
+            fi
+            exit 0
+          fi
+
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          body="$RUNNER_TEMP/mod-update-issue.md"
+          printf '%s\n\n' "$marker" > "$body"
+          cat "$report" >> "$body"
+          if [[ -n "$existing" ]]; then
+            previous=$(gh issue view "$existing" --json body --jq .body)
+            if [[ "$previous" != "$(cat "$body")" ]]; then
+              jq -Rs '{body:.}' "$body" |
+                gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/$existing" --input - --silent
+            fi
+          else
+            gh issue create --title "$title" --body-file "$body"
+          fi
