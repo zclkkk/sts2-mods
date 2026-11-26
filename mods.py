@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check upstream releases and install the pinned Slay the Spire 2 mod pack."""
+"""Build and install Slay the Spire 2 mod packs."""
 
 import argparse
 import fcntl
@@ -15,7 +15,7 @@ import tempfile
 from urllib.error import URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
-from zipfile import BadZipFile, ZipFile
+from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 
 
 ROOT = Path(__file__).resolve().parent
@@ -47,42 +47,49 @@ def github_open(url, *, api=False):
     return urlopen(Request(url, headers=headers), timeout=30)
 
 
-def release_report(lock):
-    rows = []
+def github_json(url):
+    with github_open(url, api=True) as response:
+        return json.load(response)
+
+
+def latest_release(mod, game_version):
+    api = f'https://api.github.com/repos/{mod["repo"]}/releases'
+    if not mod.get("game_versioned_tags"):
+        return github_json(f"{api}/latest")
+
+    # Undo And Restart publishes separate releases for each exact game version.
+    pattern = rf"v?{re.escape(game_version)}\.\d+"
+    page = 1
+    while releases := github_json(f"{api}?per_page=100&page={page}"):
+        matches = [
+            release for release in releases
+            if not release["draft"] and not release["prerelease"]
+            and re.fullmatch(pattern, release["tag_name"])
+        ]
+        if matches:
+            return max(matches, key=lambda release: version(release["tag_name"]))
+        page += 1
+    raise ValueError(f'未找到 {mod["name"]} 对应游戏 {game_version} 的正式版')
+
+
+def latest_mods(lock):
+    choices = []
     for mod in lock["mods"]:
-        repo = mod["repo"]
         try:
-            with github_open(f"https://api.github.com/repos/{repo}/releases/latest", api=True) as response:
-                release = json.load(response)
-            newest = release["tag_name"]
-            if version(newest) <= version(mod["tag"]):
-                print(f'{mod["name"]}: {mod["tag"]}，无更高正式版')
-                continue
+            release = latest_release(mod, lock["game_version"])
+            tag = release["tag_name"]
+            name = asset_name(mod, tag)
+            asset = next((item for item in release["assets"] if item["name"] == name), None)
+            if asset is None:
+                raise ValueError(f"{tag} 缺少预期的安装包 {name}")
+            digest = asset.get("digest")
+            if digest and not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
+                raise ValueError(f"{name} 的 GitHub 校验值无效")
+            choices.append({**mod, "tag": tag, "sha256": digest[7:] if digest else None})
+            print(f'{mod["name"]}: {tag} ({name})')
         except (URLError, ValueError, KeyError) as error:
             raise ValueError(f'{mod["name"]} 查询失败：{error}') from error
-
-        expected = asset_name(mod, newest)
-        asset = next((item for item in release["assets"] if item["name"] == expected), None)
-        digest = asset.get("digest") if asset else None
-        note = f"`{expected}`"
-        if not asset:
-            note = f"需要手动选包（预期 {note}）"
-        elif digest and re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
-            note += f"，SHA-256 `{digest[7:]}`"
-        link = f"https://github.com/{repo}/releases/tag/{newest}"
-        rows.append(f'| {mod["name"]} | {mod["tag"]} | [{newest}]({link}) | {note} |')
-        print(f'{mod["name"]}: {mod["tag"]} → {newest}')
-
-    if not rows:
-        return ""
-    header = (
-        "# Mod 更新候选\n\n"
-        f'当前游戏版本 **{lock["game_version"]}**（`{lock["steam_branch"]}`）。'
-        "请按发行说明和本机测试确认兼容性，再更新锁定清单。\n\n"
-        "| Mod | 已锁定 | 上游新版本 | 安装包 |\n"
-        "| --- | --- | --- | --- |\n"
-    )
-    return header + "\n".join(rows) + "\n"
+    return choices
 
 
 def manifests(folder, *, strict=True):
@@ -98,14 +105,15 @@ def manifests(folder, *, strict=True):
             mod_id = data["id"]
             if mod_id in result:
                 raise ValueError(f"{folder} 中有重复的 Mod ID {mod_id}")
-            result[mod_id] = data["version"]
+            result[mod_id] = data
     return result
 
 
 def unpack(mod, package, destination):
     with package.open("rb") as stream:
-        if hashlib.file_digest(stream, "sha256").hexdigest() != mod["sha256"]:
-            raise ValueError(f"{package.name} 的 SHA-256 与锁定清单不同")
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    if mod["sha256"] and mod["sha256"] != digest:
+        raise ValueError(f"{package.name} 的 SHA-256 与预期不同")
     with ZipFile(package) as archive:
         seen = set()
         if sum(entry.file_size for entry in archive.infolist()) > 256 * 1024 * 1024:
@@ -119,30 +127,118 @@ def unpack(mod, package, destination):
             seen.add(path)
         archive.extractall(destination)
     found = manifests(destination)
-    if set(found) != set(mod["ids"]) or version(found[mod["ids"][0]]) != version(mod["tag"]):
-        raise ValueError(f"{package.name} 的 Mod 清单与锁定清单不同")
+    if set(found) != set(mod["ids"]) or version(found[mod["ids"][0]]["version"]) != version(mod["tag"]):
+        raise ValueError(f"{package.name} 的 Mod 清单与预期不同")
+    return digest, found
 
 
-def pack_files(lock, source, destination):
-    for mod in lock["mods"]:
+def pack_files(mods, source, destination):
+    details = {}
+    for mod in mods:
         name = asset_name(mod, mod["tag"])
         file = source / name
         if not file.is_file():
             raise ValueError(f"找不到 {file}")
         folder = destination / mod["ids"][0]
         folder.mkdir()
-        unpack(mod, file, folder)
+        digest, found = unpack(mod, file, folder)
+        details.update(found)
+        mod["sha256"] = digest
         print(f'已核对 {mod["name"]} {mod["tag"]}')
+    return details
 
 
-def fetch_packs(lock, destination):
-    for mod in lock["mods"]:
+def fetch_packs(mods, destination):
+    for mod in mods:
         name = asset_name(mod, mod["tag"])
         repo = mod["repo"]
         tag = quote(mod["tag"], safe="")
         url = f"https://github.com/{repo}/releases/download/{tag}/{quote(name, safe='')}"
         with github_open(url) as response, (destination / name).open("wb") as file:
             shutil.copyfileobj(response, file)
+
+
+def validate_bundle(game_version, found, mods):
+    target = version(game_version)
+    for mod_id, manifest in found.items():
+        minimum = manifest.get("min_game_version")
+        if minimum and version(minimum) > target:
+            raise ValueError(f"{mod_id} 需要游戏 {minimum} 或更新版本")
+        for dependency in manifest.get("dependencies") or []:
+            dep_id = dependency if isinstance(dependency, str) else dependency["id"]
+            if dep_id not in found:
+                raise ValueError(f"{mod_id} 缺少依赖 {dep_id}")
+            minimum = dependency.get("min_version") if isinstance(dependency, dict) else None
+            if minimum and version(found[dep_id]["version"]) < version(minimum):
+                raise ValueError(f"{mod_id} 需要 {dep_id} {minimum} 或更新版本")
+    variants = mods / "STS2-RitsuLib" / "compat"
+    if variants.is_dir():
+        versions = [version(path.name) for path in variants.iterdir() if path.is_dir()]
+        if not any(candidate[:2] == target[:2] and candidate <= target for candidate in versions):
+            raise ValueError(f"RitsuLib 变体包缺少与游戏 {game_version} 匹配的组件")
+
+
+def build_bundle(lock, output):
+    output.mkdir(parents=True, exist_ok=True)
+    game_version = lock["game_version"]
+    selected = latest_mods(lock)
+    with tempfile.TemporaryDirectory(prefix="sts2-bundle-") as temp:
+        work = Path(temp)
+        packages = work / "packages"
+        mods = work / "mods"
+        packages.mkdir()
+        mods.mkdir()
+        fetch_packs(selected, packages)
+        found = pack_files(selected, packages, mods)
+        validate_bundle(game_version, found, mods)
+
+        sources = [
+            {
+                "name": mod["name"],
+                "repo": mod["repo"],
+                "tag": mod["tag"],
+                "asset": asset_name(mod, mod["tag"]),
+                "sha256": mod["sha256"],
+            }
+            for mod in selected
+        ]
+        manifest = {
+            "format": 1,
+            "game_version": game_version,
+            "steam_branch": lock["steam_branch"],
+            "mods": sources,
+        }
+        metadata = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode()
+        tag = f'mods-{game_version}-{hashlib.sha256(metadata).hexdigest()[:16]}'
+        bundle_name = f"sts2-mods-{game_version}.zip"
+        (work / "mods.bundle.json").write_bytes(metadata)
+        with ZipFile(work / bundle_name, "w") as archive:
+            files = sorted(path for path in mods.rglob("*") if path.is_file())
+            files.append(work / "mods.bundle.json")
+            for path in files:
+                entry = ZipInfo(path.relative_to(work).as_posix())
+                entry.external_attr = (stat.S_IFREG | 0o644) << 16
+                archive.writestr(entry, path.read_bytes(), compress_type=ZIP_DEFLATED)
+        with (work / bundle_name).open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        (work / f"{bundle_name}.sha256").write_text(f"{digest}  {bundle_name}\n")
+        for name in (bundle_name, f"{bundle_name}.sha256", "mods.bundle.json"):
+            shutil.move(work / name, output / name)
+
+    notes = [
+        f'游戏版本 **{game_version}**（`{lock["steam_branch"]}`）。',
+        "",
+        f"解压 `{bundle_name}`，把其中的 `mods/` 放进游戏安装目录。",
+        "",
+        "### 收录版本",
+        "",
+    ]
+    for mod in sources:
+        url = f'https://github.com/{mod["repo"]}/releases/tag/{mod["tag"]}'
+        notes.append(f'- {mod["name"]} [{mod["tag"]}]({url})')
+    (output / "release-notes.md").write_text("\n".join(notes) + "\n")
+    (output / "release-tag.txt").write_text(tag + "\n")
+    print(f"已生成 {bundle_name}（{tag}）")
 
 
 def preserve_unmanaged(lock, mods, destination):
@@ -181,8 +277,8 @@ def install(lock, game, packages, *, dry_run=False):
         if packages is None:
             packages = staging / "packages"
             packages.mkdir()
-            fetch_packs(lock, packages)
-        pack_files(lock, packages, next_mods)
+            fetch_packs(lock["mods"], packages)
+        pack_files(lock["mods"], packages, next_mods)
         preserve_unmanaged(lock, mods, next_mods)
         if dry_run:
             print(f"预检查通过：{mods}")
@@ -206,8 +302,9 @@ def install(lock, game, packages, *, dry_run=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    check = commands.add_parser("check", help="检查作者的正式 Release")
-    check.add_argument("--report", type=Path, help="输出 Markdown 更新报告")
+    commands.add_parser("check", help="显示将打包的作者正式 Release")
+    bundle = commands.add_parser("bundle", help="打包作者最新的正式 Release")
+    bundle.add_argument("--output", type=Path, required=True)
     deploy = commands.add_parser("install", help="安装锁定版本，请先退出游戏")
     deploy.add_argument("--game-dir", type=Path, default=DEFAULT_GAME)
     deploy.add_argument("--packages", type=Path, help="使用已下载的 ZIP")
@@ -216,9 +313,9 @@ def main():
     lock = read_json(ROOT / "mods.lock.json")
     try:
         if args.command == "check":
-            report = release_report(lock)
-            if args.report:
-                args.report.write_text(report, encoding="utf-8")
+            latest_mods(lock)
+        elif args.command == "bundle":
+            build_bundle(lock, args.output)
         elif args.dry_run:
             install(lock, args.game_dir, args.packages, dry_run=True)
         else:

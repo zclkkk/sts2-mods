@@ -30,6 +30,7 @@
       "name": "Undo And Restart",
       "repo": "yuudong123/Sts2UndoAndRestart",
       "tag": "v0.114.0.1",
+      "game_versioned_tags": true,
       "asset": "UndoAndRestart-{version}.zip",
       "sha256": "a222cc8df3283e901836f16ee61a3bf5c67f7c1bacef2085b7658eab0218741b",
       "ids": ["UndoAndRestart"]

@@ -1,60 +1,59 @@
-name: Track mod releases
+name: Build and release mods
 
 on:
   schedule:
     - cron: '23 2 * * *'
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/track-mods.yml'
+      - 'mods.py'
+      - 'mods.lock.json'
 
 permissions:
-  contents: read
-  issues: write
+  contents: write
 
 concurrency:
-  group: track-mod-releases
+  group: publish-mod-bundle
 
 defaults:
   run:
     shell: bash
 
 jobs:
-  track:
+  publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-      - name: Check upstream releases
+      - name: Assemble the latest upstream mods
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 mods.py bundle --output "$RUNNER_TEMP/sts2-release"
+
+      - name: Publish the ZIP
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          python3 mods.py check --report "$RUNNER_TEMP/mod-updates.md" | tee -a "$GITHUB_STEP_SUMMARY"
+          cd "$RUNNER_TEMP/sts2-release"
+          tag=$(cat release-tag.txt)
+          game_version=$(jq -r .game_version mods.bundle.json)
+          bundle="sts2-mods-$game_version.zip"
+          assets=("$bundle" "$bundle.sha256" mods.bundle.json)
 
-      - name: Publish or refresh the update issue
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          title='Mod 更新候选'
-          marker='<!-- sts2-mods:release-tracker -->'
-          report="$RUNNER_TEMP/mod-updates.md"
-          existing=$(gh issue list --state open --limit 100 --json number,title,body \
-            --jq 'map(select(.title == "Mod 更新候选" and (.body | startswith("<!-- sts2-mods:release-tracker -->")))) | .[0].number // empty')
-          if [[ ! -s "$report" ]]; then
-            if [[ -n "$existing" ]]; then
-              gh issue close "$existing" --comment '锁定清单已跟上当前的上游正式版本。'
+          if release=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft,url 2>/dev/null); then
+            if [[ $(jq -r .isDraft <<< "$release") == true ]]; then
+              gh release upload "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+              gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
             fi
-            exit 0
-          fi
-
-          cat "$report" >> "$GITHUB_STEP_SUMMARY"
-          body="$RUNNER_TEMP/mod-update-issue.md"
-          printf '%s\n\n' "$marker" > "$body"
-          cat "$report" >> "$body"
-          if [[ -n "$existing" ]]; then
-            previous=$(gh issue view "$existing" --json body --jq .body)
-            if [[ "$previous" != "$(cat "$body")" ]]; then
-              jq -Rs '{body:.}' "$body" |
-                gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/$existing" --input - --silent
-            fi
+            url=$(jq -r .url <<< "$release")
           else
-            gh issue create --title "$title" --body-file "$body"
+            url=$(gh release create "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" --latest --title "STS2 $game_version Mods · ${tag##*-}" \
+              --notes-file release-notes.md)
           fi
+          printf '[下载打包后的 Mods](%s)\n' "$url" >> "$GITHUB_STEP_SUMMARY"
