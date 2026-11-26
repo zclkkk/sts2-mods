@@ -5,25 +5,25 @@
       "name": "RitsuLib",
       "repo": "BAKAOLC/STS2-RitsuLib",
       "asset": "STS2-RitsuLib.{version}.variant-pack.zip",
-      "ids": ["STS2-RitsuLib"]
+      "folder": "STS2-RitsuLib"
     },
     {
       "name": "BaseLib",
       "repo": "Alchyr/BaseLib-StS2",
       "asset": "BaseLib.v{version}.zip",
-      "ids": ["BaseLib", "BaseLibCompatibilityHelper"]
+      "folder": "BaseLib"
     },
     {
       "name": "随机数预测",
       "repo": "hotwords123/StS2.RandomForeseer",
       "asset": "RandomForeseer-v{version}.zip",
-      "ids": ["RandomForeseer"]
+      "folder": "RandomForeseer"
     },
     {
       "name": "Undo And Restart",
       "repo": "yuudong123/Sts2UndoAndRestart",
       "asset": "UndoAndRestart-{version}.zip",
-      "ids": ["UndoAndRestart"]
+      "folder": "UndoAndRestart"
     }
   ]
 }

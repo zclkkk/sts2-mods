@@ -13,11 +13,3 @@ Release 同时提供 ZIP 的 SHA-256 和 `mods.bundle.json`，后者记录各上
 GitHub Actions 每天新加坡时间 10:23 计划运行。也可在 Actions 页面手动运行 **Build and release mods**。每次运行直接查询各作者的最新正式 Release，下载 `mods.json` 指定的 ZIP，核对下载和解压是否成功，再把完整的 `mods/` 打成 ZIP。上游包组合相同就沿用现有 Release。
 
 游戏升级后，CI 继续追踪各作者的发布。游戏补丁和 Mod 发布时间可能有差异，实际兼容性以作者说明和游戏内表现为准。
-
-用 Python 3.11 或以上版本可以查看上游版本、在本机生成同结构的 ZIP，或在退出游戏后安装上游最新包。
-
-```bash
-python3 mods.py check
-python3 mods.py bundle --output /tmp/sts2-mod-bundle
-python3 mods.py install
-```

@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Build and install Slay the Spire 2 mod packs."""
+"""Build the Slay the Spire 2 release ZIP."""
 
 import argparse
-import fcntl
 import hashlib
 import json
 import os
@@ -19,7 +18,6 @@ from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_GAME = Path.home() / ".local/share/Steam/steamapps/common/Slay the Spire 2"
 
 
 def read_json(path):
@@ -57,18 +55,6 @@ def latest_mods(config):
     return choices
 
 
-def installed_ids(folder):
-    result = set()
-    for path in folder.glob("*.json"):
-        try:
-            data = read_json(path)
-        except ValueError:
-            continue
-        if isinstance(data, dict) and isinstance(data.get("id"), str) and "version" in data:
-            result.add(data["id"])
-    return result
-
-
 def unpack(mod, package, destination):
     with package.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
@@ -89,25 +75,19 @@ def unpack(mod, package, destination):
     return digest
 
 
-def pack_files(mods, source, destination):
-    for mod in mods:
-        file = source / mod["asset"]
-        if not file.is_file():
-            raise ValueError(f"找不到 {file}")
-        folder = destination / mod["ids"][0]
-        folder.mkdir()
-        mod["sha256"] = unpack(mod, file, folder)
-        print(f'已核对 {mod["name"]} {mod["tag"]}')
-
-
-def fetch_packs(mods, destination):
+def stage_mods(mods, work, destination):
     for mod in mods:
         name = mod["asset"]
         repo = mod["repo"]
         tag = quote(mod["tag"], safe="")
         url = f"https://github.com/{repo}/releases/download/{tag}/{quote(name, safe='')}"
-        with github_open(url) as response, (destination / name).open("wb") as file:
+        package = work / name
+        with github_open(url) as response, package.open("wb") as file:
             shutil.copyfileobj(response, file)
+        folder = destination / mod["folder"]
+        folder.mkdir()
+        mod["sha256"] = unpack(mod, package, folder)
+        print(f'已核对 {mod["name"]} {mod["tag"]}')
 
 
 def build_bundle(config, output):
@@ -115,12 +95,9 @@ def build_bundle(config, output):
     selected = latest_mods(config)
     with tempfile.TemporaryDirectory(prefix="sts2-bundle-") as temp:
         work = Path(temp)
-        packages = work / "packages"
         mods = work / "mods"
-        packages.mkdir()
         mods.mkdir()
-        fetch_packs(selected, packages)
-        pack_files(selected, packages, mods)
+        stage_mods(selected, work, mods)
 
         sources = [
             {key: mod[key] for key in ("name", "repo", "tag", "asset", "sha256")}
@@ -164,88 +141,15 @@ def build_bundle(config, output):
     print(f"已生成 {bundle_name}（{tag}）")
 
 
-def preserve_unmanaged(config, mods, destination):
-    if not mods.exists():
-        return
-    managed = {mod_id for mod in config["mods"] for mod_id in mod["ids"]}
-    for path in mods.iterdir():
-        found = installed_ids(path) if path.is_dir() and not path.is_symlink() else set()
-        if found & managed:
-            if found - managed:
-                raise ValueError(f"{path} 同时包含其他 Mod，请先拆分目录")
-            continue
-        target = destination / path.name
-        if target.exists():
-            raise ValueError(f"已有目录与安装目标重名：{path}")
-        if path.is_dir() and not path.is_symlink():
-            shutil.copytree(path, target, symlinks=True)
-        else:
-            shutil.copy2(path, target, follow_symlinks=False)
-
-
-def install(config, game, packages, *, dry_run=False):
-    if not (game / "release_info.json").is_file():
-        raise ValueError(f"找不到游戏安装目录：{game}")
-    mods = game / "mods"
-    backup = game / ".sts2-mods-previous"
-    if mods.is_symlink() or (mods.exists() and not mods.is_dir()) or os.path.lexists(backup):
-        raise ValueError(f"请检查安装目录 {mods} 和可能的备份 {backup}")
-
-    selected = latest_mods(config)
-    # The staged tree and game directory must be on the same filesystem for rename.
-    with tempfile.TemporaryDirectory(prefix=".sts2-mods-", dir=None if dry_run else game) as temp:
-        staging = Path(temp)
-        next_mods = staging / "mods"
-        next_mods.mkdir()
-        if packages is None:
-            packages = staging / "packages"
-            packages.mkdir()
-            fetch_packs(selected, packages)
-        pack_files(selected, packages, next_mods)
-        preserve_unmanaged(config, mods, next_mods)
-        if dry_run:
-            print(f"预检查通过：{mods}")
-            return
-
-        if mods.exists():
-            mods.rename(backup)
-        try:
-            next_mods.rename(mods)
-        except BaseException:
-            if backup.exists():
-                backup.rename(mods)
-            raise
-        if backup.exists():
-            shutil.rmtree(backup)
-    print(f"已安装到 {mods}")
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("check", help="显示将打包的作者正式 Release")
     bundle = commands.add_parser("bundle", help="打包作者最新的正式 Release")
     bundle.add_argument("--output", type=Path, required=True)
-    deploy = commands.add_parser("install", help="安装作者最新的正式 Release，请先退出游戏")
-    deploy.add_argument("--game-dir", type=Path, default=DEFAULT_GAME)
-    deploy.add_argument("--packages", type=Path, help="使用已下载的 ZIP")
-    deploy.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     try:
         config = read_json(ROOT / "mods.json")
-        if args.command == "check":
-            latest_mods(config)
-        elif args.command == "bundle":
-            build_bundle(config, args.output)
-        elif args.dry_run:
-            install(config, args.game_dir, args.packages, dry_run=True)
-        else:
-            directory = os.open(args.game_dir, os.O_DIRECTORY)
-            try:
-                fcntl.flock(directory, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                install(config, args.game_dir, args.packages)
-            finally:
-                os.close(directory)
+        build_bundle(config, args.output)
     except (OSError, ValueError, KeyError, BadZipFile) as error:
         sys.exit(str(error))
 
