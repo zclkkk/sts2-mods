@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
@@ -49,6 +49,7 @@ jobs:
             if [[ $(jq -r .isDraft <<< "$release") == true ]]; then
               gh release upload "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
               gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+              release=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json url)
             fi
             url=$(jq -r .url <<< "$release")
           else
